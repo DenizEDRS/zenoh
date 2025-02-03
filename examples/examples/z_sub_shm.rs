@@ -62,7 +62,7 @@ async fn main() {
     let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(file_path)
+        .open(file_path.clone())
         .expect("Unable to open file");
     let mut writer = BufWriter::new(file);
     for line in received_data {
