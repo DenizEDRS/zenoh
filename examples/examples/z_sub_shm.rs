@@ -61,7 +61,7 @@ async fn main() {
     let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(file_path)
+        .open(file_path.clone())
         .expect("Unable to open file");
     let mut writer = BufWriter::new(file);
     for line in received_data {
@@ -113,6 +113,6 @@ fn extract_timestamp(payload: &str) -> Option<&str> {
     let start_pos = payload.find(start_marker)? + start_marker.len();
     let end_slice = &payload[start_pos..];
     let end_pos_relative = end_slice.find(end_marker)?;
-    let end_pos = start_pos + end_pos_relative;
+    let _end_pos = start_pos + end_pos_relative;
     Some(end_slice[..end_pos_relative].trim())
 }
