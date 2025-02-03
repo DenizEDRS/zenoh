@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use clap::Parser;
-use std::env;
 
 #[cfg(all(feature = "shared-memory", feature = "unstable"))]
 use zenoh::shm::{zshm, zshmmut};
@@ -23,7 +22,7 @@ async fn main() {
     println!("Declaring Subscriber on '{}'...", &key_expr);
     let subscriber = session.declare_subscriber(&key_expr).await.unwrap();
 
-    let file_path = env::var("ZENOH_OUTPUT_PATH").unwrap_or_else(|_| "received_messages.txt".to_string());
+    let file_path = "received_messages.txt";
     let counter = Arc::new(AtomicUsize::new(0));
     let max_messages = 5000;
     let mut received_data = Vec::with_capacity(max_messages);
@@ -62,7 +61,7 @@ async fn main() {
     let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(file_path.clone())
+        .open(file_path)
         .expect("Unable to open file");
     let mut writer = BufWriter::new(file);
     for line in received_data {
