@@ -68,7 +68,7 @@ async fn main() {
         writeln!(writer, "{}", line).expect("Unable to write to file");
     }
     writer.flush().expect("Failed to flush buffer");
-    println!("Finished receiving messages. Data logged to {}", file_path);
+    println!("Finished receiving messages. Data logged to {}", file_path.clone());
 }
 
 #[derive(clap::Parser, Clone, PartialEq, Eq, Hash, Debug)]
