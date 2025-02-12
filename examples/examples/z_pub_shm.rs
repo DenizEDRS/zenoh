@@ -1,17 +1,5 @@
-//
-// Copyright (c) 2023 ZettaScale Technology
-//
-// This program and the accompanying materials are made available under the
-// terms of the Eclipse Public License 2.0 which is available at
-// http://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
-// which is available at https://www.apache.org/licenses/LICENSE-2.0.
-//
-// SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
-//
-// Contributors:
-//   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
-//
 use clap::Parser;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zenoh::{
     key_expr::KeyExpr,
     shm::{
@@ -21,63 +9,95 @@ use zenoh::{
 };
 use zenoh_examples::CommonArgs;
 
-const N: usize = 10;
-
 #[tokio::main]
 async fn main() -> zenoh::Result<()> {
     // Initiate logging
     zenoh::init_log_from_env_or("error");
 
-    let (config, path, payload) = parse_args();
+    // Parse arguments: config, key, user-string payload, payload size, shm size
+    let (config, path, user_payload_str, payload_size, shm_size) = parse_args();
 
     println!("Opening session...");
     let session = zenoh::open(config).await.unwrap();
 
     println!("Creating POSIX SHM provider...");
-    // create an SHM backend...
-    // NOTE: For extended PosixShmProviderBackend API please check z_posix_shm_provider.rs
+    // 1. Create an SHM backend with user-defined total size (as `usize`)
     let backend = PosixShmProviderBackend::builder()
-        .with_size(N * 1024)
+        .with_size(shm_size)      // <-- must be usize
         .unwrap()
         .wait()
         .unwrap();
-    // ...and an SHM provider
+
+    // 2. Create an SHM provider
     let provider = ShmProviderBuilder::builder()
         .protocol_id::<POSIX_PROTOCOL_ID>()
         .backend(backend)
         .wait();
 
+    // 3. Declare the publisher
     let publisher = session.declare_publisher(&path).await.unwrap();
 
-    // Create allocation layout for series of similar allocations
-    println!("Allocating Shared Memory Buffer...");
-    let layout = provider.alloc(1024).into_layout().unwrap();
+    // Pre-generate a data buffer of 'payload_size' bytes (fill with 0xAB)
+    let data_buffer = vec![b'x'; payload_size];
+    let user_str_bytes = user_payload_str.as_bytes();
+    let user_str_len = user_str_bytes.len();
+
+    // 4. Calculate how large each SHM allocation needs to be.
+    //    We'll store a text prefix + user text + binary data in the same buffer.
+    //
+    //    1024 is an arbitrary overhead for the prefix. If your prefix grows,
+    //    increase it accordingly.
+    let layout_size = 1024 + user_str_len + payload_size;
+
+    println!(
+        "Allocating Shared Memory Buffer Layout: {} bytes (payload_size={})",
+        layout_size, payload_size
+    );
+
+    // 5. Create an allocation layout for repeated SHM allocations
+    let layout = provider.alloc(layout_size).into_layout().unwrap();
 
     println!("Press CTRL-C to quit...");
     for idx in 0..u32::MAX {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // Sleep for 100 microseconds between iterations
+        tokio::time::sleep(Duration::from_micros(500)).await;
 
-        // Allocate particular SHM buffer using pre-created layout
+        // Get the current timestamp in nanoseconds
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_nanos();
+
+        // 6. Allocate an SHM buffer using the pre-created layout
         let mut sbuf = layout
             .alloc()
             .with_policy::<BlockOn<GarbageCollect>>()
             .await
             .unwrap();
 
-        // We reserve a small space at the beginning of the buffer to include the iteration index
-        // of the write. This is simply to have the same format as zn_pub.
-        let prefix = format!("[{idx:4}] ");
+        // Build a prefix string: timestamp + iteration index
+        let prefix = format!("[Time: %{now_ns}% ns] [{idx:4}] ");
         let prefix_len = prefix.len();
-        let slice_len = prefix_len + payload.len();
 
+        // 7. Copy prefix + user payload + binary data into the SHM buffer
         sbuf[0..prefix_len].copy_from_slice(prefix.as_bytes());
-        sbuf[prefix_len..slice_len].copy_from_slice(payload.as_bytes());
 
-        // Write the data
+        let str_start = prefix_len;
+        let str_end = str_start + user_str_len;
+        sbuf[str_start..str_end].copy_from_slice(user_str_bytes);
+
+        let data_start = str_end;
+        let data_end = data_start + data_buffer.len();
+        sbuf[data_start..data_end].copy_from_slice(&data_buffer[..]);
+
+        // We'll publish the entire region we've written
+        let slice_len = data_end;
+
         println!(
-            "Put SHM Data ('{}': '{}')",
+            "Put SHM Data ('{}': '{}...' [total {} bytes])",
             path,
-            String::from_utf8_lossy(&sbuf[0..slice_len])
+            String::from_utf8_lossy(&sbuf[0..std::cmp::min(slice_len, 128)]),
+            slice_len
         );
         publisher.put(sbuf).await?;
     }
@@ -85,19 +105,37 @@ async fn main() -> zenoh::Result<()> {
     Ok(())
 }
 
+// ----------------------------------------------------------------------------
+
 #[derive(clap::Parser, Clone, PartialEq, Eq, Hash, Debug)]
 struct Args {
+    /// Key Expression on which to publish.
     #[arg(short, long, default_value = "demo/example/zenoh-rs-pub")]
-    /// The key expression to publish onto.
     key: KeyExpr<'static>,
+
+    /// A small user string to embed before the large data buffer.
     #[arg(short, long, default_value = "Pub from Rust SHM!")]
-    /// The payload of to publish.
     payload: String,
+
+    /// The total size (in bytes) of the large binary data buffer.
+    #[arg(long, default_value = "1024")]
+    payload_size: usize,
+
+    /// The total size (in bytes) of the shared memory region. Must be >= payload_size + overhead.
+    #[arg(long, default_value = "10485760", help = "e.g. 10485760 = 10MB")]
+    shm_size: usize,
+
     #[command(flatten)]
     common: CommonArgs,
 }
 
-fn parse_args() -> (Config, KeyExpr<'static>, String) {
+fn parse_args() -> (Config, KeyExpr<'static>, String, usize, usize) {
     let args = Args::parse();
-    (args.common.into(), args.key, args.payload)
+    (
+        args.common.into(),
+        args.key,
+        args.payload,
+        args.payload_size,
+        args.shm_size,
+    )
 }
