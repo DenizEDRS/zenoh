@@ -1,26 +1,89 @@
 use std::borrow::Cow;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use clap::Parser;
 #[cfg(all(feature = "shared-memory", feature = "unstable"))]
-use zenoh::shm::{zshm, zshmmut};
-use zenoh::{bytes::ZBytes, config::Config, key_expr::KeyExpr};
-use zenoh_examples::CommonArgs;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::io::Write;
-#[tokio::main]
-async fn main() {
-    // Initiate logging
-    zenoh::init_log_from_env_or("error");
 
-    let (config, key_expr) = parse_args();
+use zenoh::shm::{zshm, zshmmut};
+use zenoh::{key_expr::KeyExpr};
+use zenoh_examples::CommonArgs;
+use zenoh::{
+    bytes::ZBytes,
+    key_expr::keyexpr,
+    qos::CongestionControl,
+    shm::{        BlockOn, GarbageCollect, PosixShmProviderBackend, ShmProviderBuilder, POSIX_PROTOCOL_ID,
+    },
+    Config, Wait,
+};
+
+use std::fs::OpenOptions;
+use std::io::Write;
+
+fn main() -> zenoh::Result<()>{
+
+
+
+
+    zenoh::init_log_from_env_or("error");
+    
+    let (config, _key_expr) = parse_args();
+    
+
+
+    let user_payload_str = "Hello Zenoh SHM!";
+    let shm_size: usize = 2000000000; // 
+    let payload_size: usize = 500000000; // 
+
+    let key_str = "demo/example/MAILBOX";
+    let key_expr = unsafe { KeyExpr::from_str_unchecked(key_str) };
+    
+    let key_str_echo = "demo/example/ECHO";
+    let key_expr_echo = unsafe { KeyExpr::from_str_unchecked(key_str_echo) };
 
     println!("Opening session...");
-    let session = zenoh::open(config).await.unwrap();
+    let session = zenoh::open(config).wait().unwrap();
 
-    println!("Declaring Subscriber on '{}'...", &key_expr);
-    let subscriber = session.declare_subscriber(&key_expr).await.unwrap();
+
+    println!("Creating POSIX SHM provider...");
+    let backend = PosixShmProviderBackend::builder()
+    .with_size(shm_size)      // <-- must be usize
+    .unwrap()
+    .wait()
+    .unwrap();
+
+    // 2. Create an SHM provider
+    let provider = ShmProviderBuilder::builder()
+    .protocol_id::<POSIX_PROTOCOL_ID>()
+    .backend(backend)
+    .wait();
+
+
+    
+    let subscriber = session.declare_subscriber(&key_expr).wait().unwrap();
+    let ack_publisher =  session.declare_publisher(&key_expr_echo).wait().unwrap();
+
+    let user_str_bytes = user_payload_str.as_bytes();
+    let user_str_len = user_str_bytes.len();
+    let layout_size: usize = 1024 + user_str_len + payload_size;
+
+    println!(
+        "Allocating Shared Memory Buffer Layout: {} bytes (payload_size={})",
+        layout_size, payload_size
+    );
+
+    // 5. Create an allocation layout for repeated SHM allocations
+    let layout = provider.alloc(layout_size).into_layout().unwrap();
+
 
     println!("Press CTRL-C to quit...");
-    while let Ok(mut sample) = subscriber.recv_async().await {
+    while let Ok(mut sample) = subscriber.recv() {
+
+        let retrieval_timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_nanos();
+
+
         let key_str = sample.key_expr().as_str().to_owned();
 
         // Get the raw byte size of the payload
@@ -29,15 +92,31 @@ async fn main() {
         // Convert the payload into a string and detect its underlying type (SHM or RAW)
         let (payload_type, payload) = handle_bytes(sample.payload_mut());
 
-        // Get the current (retrieval) timestamp in nanoseconds.
-        let retrieval_timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_nanos();
+        
+        let mut sbuf = layout
+        .alloc()
+        .with_policy::<BlockOn<GarbageCollect>>()
+        .wait()
+        .unwrap();
 
-        // Parse the publication timestamp from the payload.
-        // The publisher creates payloads with a prefix like:
-        // "[Time: %{now_ns}% ns] [{idx:4}] ..."
+
+        let len = std::cmp::min(payload.len(), sbuf.len());
+        sbuf[..len].copy_from_slice(&payload.as_bytes()[..len]);
+
+
+
+
+        //copy the entire payload and send it tothe echo key
+        println!("Publishing ACK to ECHO: {}", key_expr_echo);
+        ack_publisher.put(sbuf).wait()?;
+        println!(
+            "Put [path: {},  total: {} bytes]",
+            key_expr_echo,
+            payload.len()
+        );
+
+        
+
         if let Some(publication_timestamp) = parse_pub_timestamp(&payload) {
             println!("Key: {key_str}");
             println!("BufferType: {payload_type}");
@@ -47,19 +126,17 @@ async fn main() {
 
             let latency = retrieval_timestamp.saturating_sub(publication_timestamp);
             println!("Latency: {latency} ns");
-            
-            // Append timestamps and latency to a file
+
+
+            //open a latency.txt, write in format: retrieval_timestamp, publication_timestamp
             let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("latency.txt")
-                .unwrap();
-            
-            let data = format!(
-                "{retrieval_timestamp}%{publication_timestamp}%{payload_size}\n"
-            );
-        file.write_all(data.as_bytes()).unwrap(); // Writing enabled here	
-            // file.write_all(data.as_bytes()).unwrap(); // Uncomment to actually write
+            .create(true)
+            .append(true)
+            .open("latency.txt")
+            .unwrap();
+            let latency_str = format!("{}, {}\n", retrieval_timestamp, publication_timestamp);
+            file.write_all(latency_str.as_bytes()).unwrap();
+
         } else {
             println!("Key: {key_str}");
             println!("BufferType: {payload_type}");
@@ -69,6 +146,7 @@ async fn main() {
 
         println!();
     }
+    Ok(())
 }
 
 #[derive(clap::Parser, Clone, PartialEq, Eq, Hash, Debug)]
@@ -89,7 +167,7 @@ fn parse_args() -> (Config, KeyExpr<'static>) {
 ///
 ///     "[Time: %{timestamp}% ns] [{idx:4}] <rest of message>"
 ///
-/// It returns `Some(timestamp)` (as nanoseconds) if parsing is successful.
+/// It returns Some(timestamp) (as nanoseconds) if parsing is successful.
 fn parse_pub_timestamp(payload: &str) -> Option<u128> {
     let prefix = "[Time: %";
     let suffix = "% ns]";
