@@ -58,11 +58,9 @@ fn main() -> zenoh::Result<()> {
     zenoh::init_log_from_env_or("error");
 
     // Parse arguments: config, key, user-string payload, payload size, shm size
-    let (config, _path, user_payload_str, payload_size, shm_size) = parse_args();
+    let (config, _path, _user_payload_str, payload_size, shm_size) = parse_args();
 
     let user_payload_str = "Hello Zenoh SHM!";
-    let shm_size: usize = 2000000000; // 4GB
-    let payload_size: usize = 500000000; // 1GB
 
 
 
