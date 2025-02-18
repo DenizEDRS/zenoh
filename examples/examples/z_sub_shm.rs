@@ -31,8 +31,6 @@ fn main() -> zenoh::Result<()>{
 
 
     let user_payload_str = "Hello Zenoh SHM!";
-    let shm_size: usize = 2000000000; // 
-    let payload_size: usize = 500000000; // 
 
     let key_str = "demo/example/MAILBOX";
     let key_expr = unsafe { KeyExpr::from_str_unchecked(key_str) };
